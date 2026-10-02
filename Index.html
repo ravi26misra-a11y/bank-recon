@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Bank Recon App</title>
+  <!-- Tailwind CSS & SheetJS (Excel Parser & Exporter) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body { -webkit-tap-highlight-color: transparent; }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 pb-16">
+
+  <!-- Header -->
+  <div class="bg-indigo-700 text-white p-4 shadow-md sticky top-0 z-50 flex justify-between items-center">
+    <div>
+      <h1 class="text-xl font-bold tracking-tight">Bank Reconcile</h1>
+      <p class="text-xs text-indigo-200">1-to-1 Match: Amount + Party Name</p>
+    </div>
+    <button id="exportBtnTop" onclick="exportToExcel()" class="hidden bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white text-xs font-bold py-2 px-3 rounded-lg shadow transition flex items-center space-x-1">
+      <span>📥 Export</span>
+    </button>
+  </div>
+
+  <div class="max-w-md mx-auto p-4 space-y-4">
+
+    <!-- Upload Section -->
+    <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 space-y-3">
+      <div>
+        <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">1. Bank Statement (Excel/CSV)</label>
+        <input type="file" id="bankFile" accept=".xlsx, .xls, .csv" class="block w-full text-sm text-slate-500 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 border border-slate-200 rounded-xl cursor-pointer" />
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">2. Software Bank Book (Excel/CSV)</label>
+        <input type="file" id="softFile" accept=".xlsx, .xls, .csv" class="block w-full text-sm text-slate-500 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 border border-slate-200 rounded-xl cursor-pointer" />
+      </div>
+
+      <button id="reconBtn" onclick="runReconciliation()" class="w-full bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] transition-all text-white font-bold py-3 px-4 rounded-xl shadow-md text-sm uppercase tracking-wide flex justify-center items-center space-x-2">
+        <span>⚡ Run Reconciliation</span>
+      </button>
+    </div>
+
+    <!-- Summary Metrics -->
+    <div id="statsSection" class="hidden space-y-3">
+      <div class="grid grid-cols-3 gap-2 text-center">
+        <div class="bg-emerald-50 border border-emerald-200 p-2.5 rounded-xl">
+          <div id="countMatched" class="text-lg font-bold text-emerald-700">0</div>
+          <div class="text-[10px] text-emerald-600 font-semibold uppercase">Matched</div>
+        </div>
+        <div class="bg-amber-50 border border-amber-200 p-2.5 rounded-xl">
+          <div id="countConflict" class="text-lg font-bold text-amber-700">0</div>
+          <div class="text-[10px] text-amber-600 font-semibold uppercase">Review / Diff</div>
+        </div>
+        <div class="bg-rose-50 border border-rose-200 p-2.5 rounded-xl">
+          <div id="countUnmatched" class="text-lg font-bold text-rose-700">0</div>
+          <div class="text-[10px] text-rose-600 font-semibold uppercase">Mismatch</div>
+        </div>
+      </div>
+
+      <!-- Action Button for Export -->
+      <button onclick="exportToExcel()" class="w-full bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-semibold py-2.5 px-4 rounded-xl shadow text-xs uppercase tracking-wider flex justify-center items-center space-x-2">
+        <span>📥 Download Full Excel Report</span>
+      </button>
+    </div>
+
+    <!-- Results Tab Controller -->
+    <div id="tabsSection" class="hidden">
+      <div class="flex bg-slate-200 p-1 rounded-xl space-x-1 text-xs font-medium">
+        <button onclick="switchTab('review')" id="tabReview" class="flex-1 py-1.5 rounded-lg bg-white shadow text-slate-800">Review (<span id="badgeReview">0</span>)</button>
+        <button onclick="switchTab('matched')" id="tabMatched" class="flex-1 py-1.5 rounded-lg text-slate-600">Matched (<span id="badgeMatched">0</span>)</button>
+        <button onclick="switchTab('unmatched')" id="tabUnmatched" class="flex-1 py-1.5 rounded-lg text-slate-600">Pending</button>
+      </div>
+
+      <!-- Tab Content Area -->
+      <div id="tabContent" class="mt-3 space-y-2.5"></div>
+    </div>
+
+  </div>
+
+  <script>
+    let bankEntries = [];
+    let softEntries = [];
+    let results = { matched: [], review: [], onlyBank: [], onlySoft: [] };
+
+    const STOPWORDS = ["PVT", "LTD", "LIMITED", "ENTERPRISE", "ENTERPRISES", "AGENCY", "AGENCIES", "PHARMA", "MEDICAL", "STORE", "CHEMIST", "AND", "CO", "DISTRIBUTOR", "DISTRIBUTORS"];
+
+    function cleanName(str) {
+      if (!str) return [];
+      let cleaned = String(str).toUpperCase().replace(/[^A-Z0-9 ]/g, " ");
+      return cleaned.split(/\s+/).filter(w => w.length > 2 && !STOPWORDS.includes(w));
+    }
+
+    function checkNameMatch(softTokens, bankNarration) {
+      if (!softTokens || softTokens.length === 0) return false;
+      const upperNarration = String(bankNarration || "").toUpperCase();
+      return softTokens.some(token => upperNarration.includes(token));
+    }
+
+    async function parseExcel(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: 'array' });
+          const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+          const json = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+          resolve(json);
+        };
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    function normalizeData(rawRows, type) {
+      return rawRows.map((r, idx) => {
+        let keys = Object.keys(r);
+        let amount = 0, name = "", date = "";
+
+        keys.forEach(k => {
+          let lower = k.toLowerCase();
+          if (lower.includes("amount") || lower.includes("credit") || lower.includes("deposit") || lower.includes("net") || lower.includes("debit") || lower.includes("withdrawal")) {
+            let val = parseFloat(String(r[k]).replace(/,/g, ''));
+            if (!isNaN(val) && val > 0 && amount === 0) amount = Math.abs(val);
+          }
+          if (type === 'soft' && (lower.includes("party") || lower.includes("ledger") || lower.includes("account") || lower.includes("particular"))) {
+            name = String(r[k]);
+          }
+          if (type === 'bank' && (lower.includes("narration") || lower.includes("description") || lower.includes("particular"))) {
+            name = String(r[k]);
+          }
+          if (lower.includes("date")) date = String(r[k]);
+        });
+
+        return {
+          id: `${type}_${idx}`,
+          date: date || "N/A",
+          name: name || "UNKNOWN",
+          tokens: cleanName(name),
+          amount: amount,
+          matched: false
+        };
+      }).filter(item => item.amount > 0);
+    }
+
+    async function runReconciliation() {
+      const bFile = document.getElementById('bankFile').files[0];
+      const sFile = document.getElementById('softFile').files[0];
+
+      if (!bFile || !sFile) {
+        alert("Dono files (Bank Statement & Software Book) select karein!");
+        return;
+      }
+
+      document.getElementById('reconBtn').innerText = "Processing...";
+
+      try {
+        const rawBank = await parseExcel(bFile);
+        const rawSoft = await parseExcel(sFile);
+
+        bankEntries = normalizeData(rawBank, 'bank');
+        softEntries = normalizeData(rawSoft, 'soft');
+
+        results = { matched: [], review: [], onlyBank: [], onlySoft: [] };
+
+        // 1. Exact Match: Amount + Party Name
+        softEntries.forEach(sItem => {
+          let exactCandidate = bankEntries.find(bItem => 
+            !bItem.matched && 
+            Math.abs(bItem.amount - sItem.amount) < 0.01 && 
+            checkNameMatch(sItem.tokens, bItem.name)
+          );
+
+          if (exactCandidate) {
+            sItem.matched = true;
+            exactCandidate.matched = true;
+            results.matched.push({ soft: sItem, bank: exactCandidate });
+          }
+        });
+
+        // 2. Conflict Match: Amount Match BUT Name Differs
+        softEntries.filter(s => !s.matched).forEach(sItem => {
+          let potentialBank = bankEntries.find(b => 
+            !b.matched && 
+            Math.abs(b.amount - sItem.amount) < 0.01
+          );
+
+          if (potentialBank) {
+            results.review.push({
+              soft: sItem,
+              bank: potentialBank,
+              reason: "Amount Matched, Name Conflict"
+            });
+          }
+        });
+
+        // 3. Unmatched Buckets
+        results.onlySoft = softEntries.filter(s => !s.matched && !results.review.some(r => r.soft.id === s.id));
+        results.onlyBank = bankEntries.filter(b => !b.matched && !results.review.some(r => r.bank.id === b.id));
+
+        renderUI();
+      } catch (err) {
+        alert("File read karne me error aaya! Format verify karein.");
+        console.error(err);
+      } finally {
+        document.getElementById('reconBtn').innerText = "⚡ Run Reconciliation";
+      }
+    }
+
+    function renderUI() {
+      document.getElementById('statsSection').classList.remove('hidden');
+      document.getElementById('tabsSection').classList.remove('hidden');
+      document.getElementById('exportBtnTop').classList.remove('hidden');
+
+      document.getElementById('countMatched').innerText = results.matched.length;
+      document.getElementById('countConflict').innerText = results.review.length;
+      document.getElementById('countUnmatched').innerText = results.onlySoft.length + results.onlyBank.length;
+
+      document.getElementById('badgeReview').innerText = results.review.length;
+      document.getElementById('badgeMatched').innerText = results.matched.length;
+
+      switchTab('review');
+    }
+
+    function switchTab(tab) {
+      const container = document.getElementById('tabContent');
+      container.innerHTML = "";
+
+      ['Review', 'Matched', 'Unmatched'].forEach(t => {
+        let btn = document.getElementById('tab' + t);
+        if (t.toLowerCase() === tab) {
+          btn.className = "flex-1 py-1.5 rounded-lg bg-white shadow text-slate-900 font-bold";
+        } else {
+          btn.className = "flex-1 py-1.5 rounded-lg text-slate-500 font-medium";
+        }
+      });
+
+      if (tab === 'review') {
+        if (results.review.length === 0) {
+          container.innerHTML = `<div class="p-6 text-center text-xs text-slate-400">No name conflicts found!</div>`;
+          return;
+        }
+        results.review.forEach(item => {
+          container.innerHTML += `
+            <div class="bg-amber-50/70 border border-amber-200 rounded-xl p-3 text-xs space-y-2">
+              <div class="flex justify-between items-center font-bold text-amber-900">
+                <span>⚠️ ₹${item.soft.amount.toLocaleString('en-IN')}</span>
+                <span class="text-[10px] bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-semibold">Name Diff</span>
+              </div>
+              <div class="space-y-1 text-slate-700 bg-white p-2.5 rounded-lg border border-amber-100">
+                <div><span class="font-semibold text-slate-400">System:</span> ${item.soft.name}</div>
+                <div><span class="font-semibold text-slate-400">Bank:</span> ${item.bank.name}</div>
+              </div>
+            </div>
+          `;
+        });
+      } else if (tab === 'matched') {
+        results.matched.forEach(item => {
+          container.innerHTML += `
+            <div class="bg-white border border-emerald-200 rounded-xl p-3 text-xs flex justify-between items-center shadow-sm">
+              <div class="pr-2">
+                <div class="font-bold text-slate-800">${item.soft.name}</div>
+                <div class="text-[10px] text-slate-400 truncate max-w-[200px]">${item.bank.name}</div>
+              </div>
+              <div class="text-right whitespace-nowrap">
+                <div class="font-bold text-emerald-600">₹${item.soft.amount.toLocaleString('en-IN')}</div>
+                <div class="text-[10px] text-slate-400">${item.soft.date}</div>
+              </div>
+            </div>
+          `;
+        });
+      } else if (tab === 'unmatched') {
+        container.innerHTML += `<div class="text-[11px] font-bold text-slate-500 uppercase px-1">Only In Bank (${results.onlyBank.length})</div>`;
+        results.onlyBank.forEach(b => {
+          container.innerHTML += `
+            <div class="bg-white border border-slate-200 rounded-xl p-2.5 text-xs flex justify-between items-center">
+              <div class="truncate max-w-[210px] font-medium text-slate-700">${b.name}</div>
+              <div class="font-bold text-indigo-600 whitespace-nowrap">₹${b.amount.toLocaleString('en-IN')}</div>
+            </div>
+          `;
+        });
+        container.innerHTML += `<div class="text-[11px] font-bold text-slate-500 uppercase px-1 mt-3">Only In Software (${results.onlySoft.length})</div>`;
+        results.onlySoft.forEach(s => {
+          container.innerHTML += `
+            <div class="bg-white border border-slate-200 rounded-xl p-2.5 text-xs flex justify-between items-center">
+              <div class="font-medium text-slate-700">${s.name}</div>
+              <div class="font-bold text-slate-600 whitespace-nowrap">₹${s.amount.toLocaleString('en-IN')}</div>
+            </div>
+          `;
+        });
+      }
+    }
+
+    // 📥 Excel Export Engine
+    function exportToExcel() {
+      if (results.matched.length === 0 && results.review.length === 0 && results.onlyBank.length === 0 && results.onlySoft.length === 0) {
+        alert("Pehle reconciliation run karein!");
+        return;
+      }
+
+      const wb = XLSX.utils.book_new();
+
+      // Sheet 1: Review Conflicts
+      const reviewData = results.review.map(r => ({
+        "Amount": r.soft.amount,
+        "Software Date": r.soft.date,
+        "Software Party Name": r.soft.name,
+        "Bank Narration": r.bank.name,
+        "Conflict Reason": r.reason
+      }));
+      const wsReview = XLSX.utils.json_to_sheet(reviewData.length ? reviewData : [{"Status": "No Conflicts"}]);
+      XLSX.utils.book_append_sheet(wb, wsReview, "Name_Conflicts");
+
+      // Sheet 2: Matched
+      const matchedData = results.matched.map(m => ({
+        "Amount": m.soft.amount,
+        "Software Date": m.soft.date,
+        "Software Party Name": m.soft.name,
+        "Bank Narration": m.bank.name,
+        "Status": "RECONCILED"
+      }));
+      const wsMatched = XLSX.utils.json_to_sheet(matchedData.length ? matchedData : [{"Status": "No Matched Records"}]);
+      XLSX.utils.book_append_sheet(wb, wsMatched, "Auto_Matched");
+
+      // Sheet 3: Only In Bank
+      const bankOnlyData = results.onlyBank.map(b => ({
+        "Amount": b.amount,
+        "Bank Value Date": b.date,
+        "Bank Narration": b.name,
+        "Action Required": "Post Receipt/Payment in Software"
+      }));
+      const wsBankOnly = XLSX.utils.json_to_sheet(bankOnlyData.length ? bankOnlyData : [{"Status": "None"}]);
+      XLSX.utils.book_append_sheet(wb, wsBankOnly, "Only_In_Bank");
+
+      // Sheet 4: Only In Software
+      const softOnlyData = results.onlySoft.map(s => ({
+        "Amount": s.amount,
+        "Software Date": s.date,
+        "Party Name": s.name,
+        "Action Required": "Pending Bank Clearance"
+      }));
+      const wsSoftOnly = XLSX.utils.json_to_sheet(softOnlyData.length ? softOnlyData : [{"Status": "None"}]);
+      XLSX.utils.book_append_sheet(wb, wsSoftOnly, "Only_In_Software");
+
+      // Generate Download
+      const today = new Date().toISOString().slice(0, 10);
+      XLSX.writeFile(wb, `Reconciliation_Report_${today}.xlsx`);
+    }
+  </script>
+</body>
+</html>
