@@ -16,7 +16,7 @@
   <div class="bg-indigo-700 text-white p-4 shadow-md sticky top-0 z-50 flex justify-between items-center">
     <div>
       <h1 class="text-xl font-bold tracking-tight">Bank Reconcile</h1>
-      <p class="text-xs text-indigo-200">Axis Bank vs Software Ledger</p>
+      <p class="text-xs text-indigo-200">Smart Odd/Round & Cheque Recon</p>
     </div>
     <button id="exportBtnTop" onclick="exportToExcel()" class="hidden bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white text-xs font-bold py-2 px-3 rounded-lg shadow transition flex items-center space-x-1">
       <span>📥 Export</span>
@@ -96,6 +96,13 @@
       return softTokens.some(token => upperNarration.includes(token));
     }
 
+    // Identifies Round Amounts (e.g. 50,000, 2,00,000, 30,000)
+    function isRoundAmount(amt) {
+      if (amt >= 10000) return amt % 1000 === 0;
+      if (amt >= 1000) return amt % 500 === 0;
+      return amt % 100 === 0;
+    }
+
     async function parseFile(file) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -115,7 +122,6 @@
       });
     }
 
-    // Smart Matrix Extractor
     function parseBankMatrix(matrix) {
       let headerRowIndex = -1;
       let colMap = {};
@@ -146,14 +152,17 @@
         let type = String(row[colMap.type] || "").trim().toUpperCase();
         let name = String(row[colMap.particulars] || "").trim();
         let date = String(row[colMap.date] || "").trim();
+        let chq = String(row[colMap.chq] || "").replace(/[\t,\0]/g, '').replace(/\.0$/, '').trim();
+        if (chq.toLowerCase() === "nan") chq = "";
 
         if (!isNaN(amount) && amount > 0 && !name.toUpperCase().includes("OPENING BALANCE")) {
           list.push({
             id: `BNK_${i}`,
             date: date,
             name: name,
+            chq: chq,
             amount: Math.round(amount * 100) / 100,
-            type: type, // CR or DR
+            type: type,
             matched: false
           });
         }
@@ -181,10 +190,7 @@
         }
       }
 
-      if (headerRowIndex === -1) {
-        // Fallback for standard tables
-        return parseStandardSoftware(matrix);
-      }
+      if (headerRowIndex === -1) return [];
 
       let list = [];
       for (let i = headerRowIndex + 1; i < matrix.length; i++) {
@@ -193,25 +199,26 @@
         let signedAmount = parseFloat(rawAmt);
         let partyName = String(row[colMap.party] || "").replace(/\0/g, '').trim();
         let date = String(row[colMap.date] || "").trim();
+        let chq = String(row[colMap.chq] || "").replace(/[\t,\0]/g, '').trim();
+        
+        // Remove standard mode tokens
+        if (["nan", "NEFT", "RTGS", "UPI", "IMPS", "CHEQUE"].includes(chq.toUpperCase())) {
+          chq = "";
+        }
 
         if (!isNaN(signedAmount) && signedAmount !== 0 && !partyName.toLowerCase().includes("opening balance")) {
           list.push({
             id: `SFT_${i}`,
             date: date,
             name: partyName,
+            chq: chq,
             tokens: cleanName(partyName),
             amount: Math.round(Math.abs(signedAmount) * 100) / 100,
-            type: signedAmount > 0 ? "CR" : "DR", // +ve is Inflow (Bank CR), -ve is Outflow (Bank DR)
+            type: signedAmount > 0 ? "CR" : "DR",
             matched: false
           });
         }
       }
-      return list;
-    }
-
-    function parseStandardSoftware(matrix) {
-      // General fallback if headers are Date, Particulars, Debit, Credit
-      let list = [];
       return list;
     }
 
@@ -234,52 +241,83 @@
         softEntries = parseSoftwareMatrix(rawSoft);
 
         if (bankEntries.length === 0 || softEntries.length === 0) {
-          alert("Files read nahi ho paayi! Kripya sahi files check karein.");
+          alert("Files read nahi ho paayi! Structure verify karein.");
           return;
         }
 
         results = { matched: [], review: [], onlyBank: [], onlySoft: [] };
 
-        // 1. Pass 1: Amount + Dr/Cr Type + Party Name Tokens
-        softEntries.forEach(sItem => {
-          let exactCandidate = bankEntries.find(bItem => 
-            !bItem.matched && 
-            Math.abs(bItem.amount - sItem.amount) < 0.01 &&
-            (bItem.type === sItem.type || !bItem.type) &&
-            checkNameMatch(sItem.tokens, bItem.name)
-          );
-
-          if (exactCandidate) {
-            sItem.matched = true;
-            exactCandidate.matched = true;
-            results.matched.push({ soft: sItem, bank: exactCandidate });
+        // 1. Pass 1: Cheque / Reference Match + Amount
+        softEntries.forEach(s => {
+          if (s.chq && s.chq.length >= 4) {
+            let b = bankEntries.find(x => 
+              !x.matched && 
+              Math.abs(x.amount - s.amount) < 0.01 && 
+              x.type === s.type && 
+              (x.chq === s.chq || x.name.includes(s.chq))
+            );
+            if (b) {
+              s.matched = true;
+              b.matched = true;
+              results.matched.push({ soft: s, bank: b, matchType: "Cheque + Amount" });
+            }
           }
         });
 
-        // 2. Pass 2: Amount + Type matched, BUT Name differs (Review/Diff)
-        softEntries.filter(s => !s.matched).forEach(sItem => {
-          let potentialBank = bankEntries.find(b => 
-            !b.matched && 
-            Math.abs(b.amount - sItem.amount) < 0.01 &&
-            (b.type === sItem.type || !b.type)
+        // 2. Pass 2: Party Name Match + Amount
+        softEntries.filter(s => !s.matched).forEach(s => {
+          let b = bankEntries.find(x => 
+            !x.matched && 
+            Math.abs(x.amount - s.amount) < 0.01 && 
+            x.type === s.type && 
+            checkNameMatch(s.tokens, x.name)
           );
+          if (b) {
+            s.matched = true;
+            b.matched = true;
+            results.matched.push({ soft: s, bank: b, matchType: "Name + Amount" });
+          }
+        });
 
-          if (potentialBank) {
+        // 3. Pass 3: Random / Non-Round Odd Amount Match (e.g. 6511, 9219, etc.)
+        softEntries.filter(s => !s.matched).forEach(s => {
+          if (!isRoundAmount(s.amount)) {
+            let b = bankEntries.find(x => 
+              !x.matched && 
+              Math.abs(x.amount - s.amount) < 0.01 && 
+              x.type === s.type
+            );
+            if (b) {
+              s.matched = true;
+              b.matched = true;
+              results.matched.push({ soft: s, bank: b, matchType: "Unique Odd Amount" });
+            }
+          }
+        });
+
+        // 4. Pass 4: ONLY Round amounts where NOTHING else matched -> Review / Diff
+        softEntries.filter(s => !s.matched).forEach(s => {
+          let b = bankEntries.find(x => 
+            !x.matched && 
+            Math.abs(x.amount - s.amount) < 0.01 && 
+            x.type === s.type
+          );
+          if (b) {
             results.review.push({
-              soft: sItem,
-              bank: potentialBank,
-              reason: "Amount Matched, Name Differs"
+              soft: s,
+              bank: b,
+              reason: "Round Amount (Name & Cheque Unverified)"
             });
           }
         });
 
-        // 3. Unmatched Buckets
+        // 5. Unmatched Buckets
         results.onlySoft = softEntries.filter(s => !s.matched && !results.review.some(r => r.soft.id === s.id));
         results.onlyBank = bankEntries.filter(b => !b.matched && !results.review.some(r => r.bank.id === b.id));
 
         renderUI();
       } catch (err) {
-        alert("Error occurred while parsing: " + err.message);
+        alert("Error occurred: " + err.message);
         console.error(err);
       } finally {
         document.getElementById('reconBtn').innerText = "⚡ Run Reconciliation";
@@ -298,7 +336,7 @@
       document.getElementById('badgeReview').innerText = results.review.length;
       document.getElementById('badgeMatched').innerText = results.matched.length;
 
-      switchTab('review');
+      switchTab(results.review.length > 0 ? 'review' : 'matched');
     }
 
     function switchTab(tab) {
@@ -316,7 +354,7 @@
 
       if (tab === 'review') {
         if (results.review.length === 0) {
-          container.innerHTML = `<div class="p-6 text-center text-xs text-slate-400">No name conflicts found!</div>`;
+          container.innerHTML = `<div class="p-6 text-center text-xs text-slate-400">All amounts matched perfectly! No round figure conflicts.</div>`;
           return;
         }
         results.review.forEach(item => {
@@ -324,7 +362,7 @@
             <div class="bg-amber-50/70 border border-amber-200 rounded-xl p-3 text-xs space-y-2">
               <div class="flex justify-between items-center font-bold text-amber-900">
                 <span>₹${item.soft.amount.toLocaleString('en-IN')} (${item.soft.type})</span>
-                <span class="text-[10px] bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-semibold">Name Diff</span>
+                <span class="text-[10px] bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-semibold">Review Needed</span>
               </div>
               <div class="space-y-1 text-slate-700 bg-white p-2.5 rounded-lg border border-amber-100">
                 <div><span class="font-semibold text-slate-400">System:</span> ${item.soft.name}</div>
@@ -334,7 +372,7 @@
           `;
         });
       } else if (tab === 'matched') {
-        results.matched.forEach(item => {
+        results.matched.slice(0, 100).forEach(item => {
           container.innerHTML += `
             <div class="bg-white border border-emerald-200 rounded-xl p-3 text-xs flex justify-between items-center shadow-sm">
               <div class="pr-2">
@@ -343,11 +381,14 @@
               </div>
               <div class="text-right whitespace-nowrap">
                 <div class="font-bold text-emerald-600">₹${item.soft.amount.toLocaleString('en-IN')}</div>
-                <div class="text-[10px] text-slate-400">${item.soft.type} | ${item.soft.date}</div>
+                <div class="text-[10px] text-slate-400">${item.soft.type} | <span class="text-emerald-700 font-semibold">${item.matchType}</span></div>
               </div>
             </div>
           `;
         });
+        if (results.matched.length > 100) {
+          container.innerHTML += `<div class="text-center text-xs text-slate-400 py-2">Showing first 100 of ${results.matched.length} matched records (Download Excel for full list).</div>`;
+        }
       } else if (tab === 'unmatched') {
         container.innerHTML += `<div class="text-[11px] font-bold text-slate-500 uppercase px-1">Only In Bank (${results.onlyBank.length})</div>`;
         results.onlyBank.slice(0, 50).forEach(b => {
@@ -386,7 +427,7 @@
         "Bank Narration": r.bank.name,
         "Conflict Reason": r.reason
       }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reviewData.length ? reviewData : [{"Status": "No Conflicts"}]), "Name_Conflicts");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reviewData.length ? reviewData : [{"Status": "No Conflicts"}]), "Review_Conflicts");
 
       const matchedData = results.matched.map(m => ({
         "Amount": m.soft.amount,
@@ -394,6 +435,7 @@
         "Software Date": m.soft.date,
         "Software Party Name": m.soft.name,
         "Bank Narration": m.bank.name,
+        "Match Method": m.matchType,
         "Status": "RECONCILED"
       }));
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(matchedData.length ? matchedData : [{"Status": "No Matched Records"}]), "Auto_Matched");
