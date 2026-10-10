@@ -16,7 +16,7 @@
   <div class="bg-indigo-700 text-white p-4 shadow-md sticky top-0 z-50 flex justify-between items-center">
     <div>
       <h1 class="text-xl font-bold tracking-tight">Bank Reconcile</h1>
-      <p class="text-xs text-indigo-200">Date Format: DD/MM/YYYY | Contra Pairing</p>
+      <p class="text-xs text-indigo-200">Indian Date Format: DD/MM/YYYY Fixed</p>
     </div>
     <button id="exportBtnTop" onclick="exportToExcel()" class="hidden bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white text-xs font-bold py-2 px-3 rounded-lg shadow transition flex items-center space-x-1">
       <span>📥 Export</span>
@@ -84,22 +84,32 @@
 
     const STOPWORDS = ["PVT", "LTD", "LIMITED", "ENTERPRISE", "ENTERPRISES", "AGENCY", "AGENCIES", "PHARMA", "MEDICAL", "STORE", "CHEMIST", "AND", "CO", "DISTRIBUTOR", "DISTRIBUTORS", "ASSOCIATES", "INDIA"];
 
-    // 🔒 100% Strict DD/MM/YYYY Formatter
+    // 🔒 Strict Indian Standard DD/MM/YYYY Formatter
     function formatToDDMMYYYY(val) {
       if (val === undefined || val === null || val === "") return "-";
-      
-      // If JavaScript Date object
-      if (val instanceof Date) {
-        let d = String(val.getDate()).padStart(2, '0');
-        let m = String(val.getMonth() + 1).padStart(2, '0');
-        let y = val.getFullYear();
-        return `${d}/${m}/${y}`;
-      }
 
       let s = String(val).replace(/\0/g, '').trim();
       if (!s || s.toLowerCase() === "nan") return "-";
 
-      // If Excel serial number (like 46118, 46123)
+      // 1. If Bank CSV / String has DD/MM/YYYY or DD-MM-YYYY (Preserve DD first!)
+      let dmy = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+      if (dmy) {
+        let d = String(dmy[1]).padStart(2, '0');
+        let m = String(dmy[2]).padStart(2, '0');
+        let y = dmy[3];
+        return `${d}/${m}/${y}`;
+      }
+
+      // 2. If Software has YYYY-MM-DD (e.g. 2026-04-06 -> 06/04/2026)
+      let ymd = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+      if (ymd) {
+        let y = ymd[1];
+        let m = String(ymd[2]).padStart(2, '0');
+        let d = String(ymd[3]).padStart(2, '0');
+        return `${d}/${m}/${y}`;
+      }
+
+      // 3. If Excel 5-digit Serial Number (like 46118 for 06/04/2026)
       let num = Number(s);
       if (!isNaN(num) && num > 10000 && num < 80000) {
         let excelEpoch = new Date(Date.UTC(1899, 11, 30));
@@ -110,21 +120,11 @@
         return `${d}/${m}/${y}`;
       }
 
-      // Check YYYY-MM-DD or YYYY/MM/DD (with optional timestamp)
-      let ymd = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
-      if (ymd) {
-        let y = ymd[1];
-        let m = String(ymd[2]).padStart(2, '0');
-        let d = String(ymd[3]).padStart(2, '0');
-        return `${d}/${m}/${y}`;
-      }
-
-      // Check DD-MM-YYYY or DD/MM/YYYY
-      let dmy = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
-      if (dmy) {
-        let d = String(dmy[1]).padStart(2, '0');
-        let m = String(dmy[2]).padStart(2, '0');
-        let y = dmy[3];
+      // 4. If JavaScript Date object
+      if (val instanceof Date) {
+        let d = String(val.getDate()).padStart(2, '0');
+        let m = String(val.getMonth() + 1).padStart(2, '0');
+        let y = val.getFullYear();
         return `${d}/${m}/${y}`;
       }
 
@@ -149,7 +149,7 @@
       return amt % 100 === 0;
     }
 
-    // 🎯 Reversal/Contra Pairing & Sorting Engine (Credit First, Phir Debit)
+    // 🎯 Reversal/Contra Pairing & Sorting Engine
     function organizePendingList(items) {
       let credits = items.filter(x => x.type === "CR");
       let debits = items.filter(x => x.type === "DR");
@@ -171,7 +171,6 @@
 
       let remainingDebits = unpairedDebits.map(dr => ({ ...dr, isContra: false }));
 
-      // Order: Paired First (Up-Down), then all single Credits, then all single Debits
       return [...pairedGroups, ...unpairedCredits, ...remainingDebits];
     }
 
@@ -181,9 +180,10 @@
         reader.onload = (e) => {
           try {
             const data = new Uint8Array(e.target.result);
-            const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+            // CRITICAL: raw: true & cellDates: false prevents SheetJS from reversing Day and Month!
+            const workbook = XLSX.read(data, { type: 'array', raw: true, cellDates: false });
             const sheet = workbook.Sheets[workbook.SheetNames[0]];
-            const rawMatrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+            const rawMatrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
             resolve(rawMatrix);
           } catch (err) {
             reject(err);
@@ -207,6 +207,7 @@
             if (cl.includes("particular")) colMap.particulars = cIdx;
             if (cl.includes("amount")) colMap.amount = cIdx;
             if (cl.includes("debit/credit") || cl.includes("type")) colMap.type = cIdx;
+            // Prefer Transaction Date / Value Date column
             if (cl.includes("date") && colMap.date === undefined) colMap.date = cIdx;
             if (cl.includes("cheque")) colMap.chq = cIdx;
           });
@@ -217,201 +218,4 @@
       if (headerRowIndex === -1) return [];
 
       let list = [];
-      for (let i = headerRowIndex + 1; i < matrix.length; i++) {
-        let row = matrix[i];
-        let rawAmt = String(row[colMap.amount] || "").replace(/[\t,]/g, '').trim();
-        let amount = parseFloat(rawAmt);
-        let type = String(row[colMap.type] || "").trim().toUpperCase();
-        let name = String(row[colMap.particulars] || "").trim();
-        let date = formatToDDMMYYYY(row[colMap.date]);
-        let chq = String(row[colMap.chq] || "").replace(/[\t,\0]/g, '').replace(/\.0$/, '').trim();
-        if (chq.toLowerCase() === "nan") chq = "";
-
-        if (!isNaN(amount) && amount > 0 && !name.toUpperCase().includes("OPENING BALANCE")) {
-          list.push({
-            id: `BNK_${i}`,
-            date: date,
-            name: name,
-            chq: chq,
-            amount: Math.round(amount * 100) / 100,
-            type: type,
-            matched: false
-          });
-        }
-      }
-      return list;
-    }
-
-    function parseSoftwareMatrix(matrix) {
-      let headerRowIndex = -1;
-      let colMap = {};
-
-      for (let i = 0; i < Math.min(20, matrix.length); i++) {
-        let rowStr = matrix[i].map(c => String(c).toLowerCase()).join(" ");
-        if (rowStr.includes("n_amount") || (rowStr.includes("c_opp_name") && rowStr.includes("d_date"))) {
-          headerRowIndex = i;
-          matrix[i].forEach((colName, cIdx) => {
-            let cl = String(colName).toLowerCase().trim();
-            if (cl === "n_amount" || cl.includes("amount")) colMap.amount = cIdx;
-            if (cl === "c_opp_name" || cl.includes("party") || cl.includes("ledger")) colMap.party = cIdx;
-            if (cl === "d_date" || cl.includes("date")) colMap.date = cIdx;
-            if (cl === "c_remark") colMap.remark = cIdx;
-            if (cl === "c_chq_no") colMap.chq = cIdx;
-          });
-          break;
-        }
-      }
-
-      if (headerRowIndex === -1) return [];
-
-      let list = [];
-      for (let i = headerRowIndex + 1; i < matrix.length; i++) {
-        let row = matrix[i];
-        let rawAmt = String(row[colMap.amount] || "").replace(/[\t,\0]/g, '').trim();
-        let signedAmount = parseFloat(rawAmt);
-        let partyName = String(row[colMap.party] || "").replace(/\0/g, '').trim();
-        let date = formatToDDMMYYYY(row[colMap.date]);
-        let chq = String(row[colMap.chq] || "").replace(/[\t,\0]/g, '').trim();
-
-        if (["nan", "NEFT", "RTGS", "UPI", "IMPS", "CHEQUE"].includes(chq.toUpperCase())) {
-          chq = "";
-        }
-
-        if (!isNaN(signedAmount) && signedAmount !== 0 && !partyName.toLowerCase().includes("opening balance")) {
-          list.push({
-            id: `SFT_${i}`,
-            date: date,
-            name: partyName,
-            chq: chq,
-            tokens: cleanName(partyName),
-            amount: Math.round(Math.abs(signedAmount) * 100) / 100,
-            type: signedAmount > 0 ? "CR" : "DR",
-            matched: false
-          });
-        }
-      }
-      return list;
-    }
-
-    async function runReconciliation() {
-      const bFile = document.getElementById('bankFile').files[0];
-      const sFile = document.getElementById('softFile').files[0];
-
-      if (!bFile || !sFile) {
-        alert("Dono files (Bank Statement CSV aur Software XLS) select karein!");
-        return;
-      }
-
-      document.getElementById('reconBtn').innerText = "Processing Data...";
-
-      try {
-        const rawBank = await parseFile(bFile);
-        const rawSoft = await parseFile(sFile);
-
-        bankEntries = parseBankMatrix(rawBank);
-        softEntries = parseSoftwareMatrix(rawSoft);
-
-        if (bankEntries.length === 0 || softEntries.length === 0) {
-          alert("Files read nahi ho paayi! Structure verify karein.");
-          return;
-        }
-
-        results = { matched: [], review: [], onlyBank: [], onlySoft: [] };
-
-        // 1. Pass 1: Cheque / Ref Match + Amount
-        softEntries.forEach(s => {
-          if (s.chq && s.chq.length >= 4) {
-            let b = bankEntries.find(x => 
-              !x.matched && 
-              Math.abs(x.amount - s.amount) < 0.01 && 
-              x.type === s.type && 
-              (x.chq === s.chq || x.name.includes(s.chq))
-            );
-            if (b) {
-              s.matched = true;
-              b.matched = true;
-              results.matched.push({ soft: s, bank: b, matchType: "Cheque + Amount" });
-            }
-          }
-        });
-
-        // 2. Pass 2: Party Name Match + Amount
-        softEntries.filter(s => !s.matched).forEach(s => {
-          let b = bankEntries.find(x => 
-            !x.matched && 
-            Math.abs(x.amount - s.amount) < 0.01 && 
-            x.type === s.type && 
-            checkNameMatch(s.tokens, x.name)
-          );
-          if (b) {
-            s.matched = true;
-            b.matched = true;
-            results.matched.push({ soft: s, bank: b, matchType: "Name + Amount" });
-          }
-        });
-
-        // 3. Pass 3: Random / Non-Round Odd Amount Match
-        softEntries.filter(s => !s.matched).forEach(s => {
-          if (!isRoundAmount(s.amount)) {
-            let b = bankEntries.find(x => 
-              !x.matched && 
-              Math.abs(x.amount - s.amount) < 0.01 && 
-              x.type === s.type
-            );
-            if (b) {
-              s.matched = true;
-              b.matched = true;
-              results.matched.push({ soft: s, bank: b, matchType: "Unique Odd Amount" });
-            }
-          }
-        });
-
-        // 4. Pass 4: ONLY Round amounts where NOTHING else matched -> Review
-        softEntries.filter(s => !s.matched).forEach(s => {
-          let b = bankEntries.find(x => 
-            !x.matched && 
-            Math.abs(x.amount - s.amount) < 0.01 && 
-            x.type === s.type
-          );
-          if (b) {
-            results.review.push({
-              soft: s,
-              bank: b,
-              reason: "Round Amount (Name & Cheque Unverified)"
-            });
-          }
-        });
-
-        // 5. Unmatched Buckets with Smart Reversal Pairing & Sorting
-        let rawOnlySoft = softEntries.filter(s => !s.matched && !results.review.some(r => r.soft.id === s.id));
-        let rawOnlyBank = bankEntries.filter(b => !b.matched && !results.review.some(r => r.bank.id === b.id));
-
-        results.onlySoft = organizePendingList(rawOnlySoft);
-        results.onlyBank = organizePendingList(rawOnlyBank);
-
-        renderUI();
-      } catch (err) {
-        alert("Error occurred: " + err.message);
-        console.error(err);
-      } finally {
-        document.getElementById('reconBtn').innerText = "⚡ Run Reconciliation";
-      }
-    }
-
-    function renderUI() {
-      document.getElementById('statsSection').classList.remove('hidden');
-      document.getElementById('tabsSection').classList.remove('hidden');
-      document.getElementById('exportBtnTop').classList.remove('hidden');
-
-      document.getElementById('countMatched').innerText = results.matched.length;
-      document.getElementById('countConflict').innerText = results.review.length;
-      document.getElementById('countUnmatched').innerText = results.onlySoft.length + results.onlyBank.length;
-
-      document.getElementById('badgeReview').innerText = results.review.length;
-      document.getElementById('badgeMatched').innerText = results.matched.length;
-
-      switchTab(results.review.length > 0 ? 'review' : 'matched');
-    }
-
-    function switchTab(tab) {
-      const container = document.getElementById('tabContent
+      for (let i = headerRowIndex +
