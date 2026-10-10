@@ -16,7 +16,7 @@
   <div class="bg-indigo-700 text-white p-4 shadow-md sticky top-0 z-50 flex justify-between items-center">
     <div>
       <h1 class="text-xl font-bold tracking-tight">Bank Reconcile</h1>
-      <p class="text-xs text-indigo-200">Strict Date Format: DD/MM/YYYY</p>
+      <p class="text-xs text-indigo-200">Date Format: DD/MM/YYYY | Contra Pairing</p>
     </div>
     <button id="exportBtnTop" onclick="exportToExcel()" class="hidden bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white text-xs font-bold py-2 px-3 rounded-lg shadow transition flex items-center space-x-1">
       <span>📥 Export</span>
@@ -84,11 +84,11 @@
 
     const STOPWORDS = ["PVT", "LTD", "LIMITED", "ENTERPRISE", "ENTERPRISES", "AGENCY", "AGENCIES", "PHARMA", "MEDICAL", "STORE", "CHEMIST", "AND", "CO", "DISTRIBUTOR", "DISTRIBUTORS", "ASSOCIATES", "INDIA"];
 
-    // 100% Robust Date Converter to DD/MM/YYYY
+    // 🔒 100% Strict DD/MM/YYYY Formatter
     function formatToDDMMYYYY(val) {
-      if (!val && val !== 0) return "-";
+      if (val === undefined || val === null || val === "") return "-";
       
-      // If already a JavaScript Date object
+      // If JavaScript Date object
       if (val instanceof Date) {
         let d = String(val.getDate()).padStart(2, '0');
         let m = String(val.getMonth() + 1).padStart(2, '0');
@@ -96,40 +96,39 @@
         return `${d}/${m}/${y}`;
       }
 
-      let str = String(val).replace(/\0/g, '').trim();
-      if (!str || str.toLowerCase() === "nan") return "-";
+      let s = String(val).replace(/\0/g, '').trim();
+      if (!s || s.toLowerCase() === "nan") return "-";
 
       // If Excel serial number (like 46118, 46123)
-      let num = Number(str);
+      let num = Number(s);
       if (!isNaN(num) && num > 10000 && num < 80000) {
-        // Excel base date is 30 Dec 1899
         let excelEpoch = new Date(Date.UTC(1899, 11, 30));
-        let converted = new Date(excelEpoch.getTime() + num * 86400000);
+        let converted = new Date(excelEpoch.getTime() + Math.round(num) * 86400000);
         let d = String(converted.getUTCDate()).padStart(2, '0');
         let m = String(converted.getUTCMonth() + 1).padStart(2, '0');
         let y = converted.getUTCFullYear();
         return `${d}/${m}/${y}`;
       }
 
-      // If YYYY-MM-DD or YYYY/MM/DD
-      let ymdMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
-      if (ymdMatch) {
-        let y = ymdMatch[1];
-        let m = String(ymdMatch[2]).padStart(2, '0');
-        let d = String(ymdMatch[3]).padStart(2, '0');
+      // Check YYYY-MM-DD or YYYY/MM/DD (with optional timestamp)
+      let ymd = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+      if (ymd) {
+        let y = ymd[1];
+        let m = String(ymd[2]).padStart(2, '0');
+        let d = String(ymd[3]).padStart(2, '0');
         return `${d}/${m}/${y}`;
       }
 
-      // If DD-MM-YYYY or DD/MM/YYYY
-      let dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
-      if (dmyMatch) {
-        let d = String(dmyMatch[1]).padStart(2, '0');
-        let m = String(dmyMatch[2]).padStart(2, '0');
-        let y = dmyMatch[3];
+      // Check DD-MM-YYYY or DD/MM/YYYY
+      let dmy = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+      if (dmy) {
+        let d = String(dmy[1]).padStart(2, '0');
+        let m = String(dmy[2]).padStart(2, '0');
+        let y = dmy[3];
         return `${d}/${m}/${y}`;
       }
 
-      return str;
+      return s;
     }
 
     function cleanName(str) {
@@ -148,6 +147,32 @@
       if (amt >= 10000) return amt % 1000 === 0;
       if (amt >= 1000) return amt % 500 === 0;
       return amt % 100 === 0;
+    }
+
+    // 🎯 Reversal/Contra Pairing & Sorting Engine (Credit First, Phir Debit)
+    function organizePendingList(items) {
+      let credits = items.filter(x => x.type === "CR");
+      let debits = items.filter(x => x.type === "DR");
+
+      let pairedGroups = [];
+      let unpairedCredits = [];
+      let unpairedDebits = [...debits];
+
+      credits.forEach(cr => {
+        let matchIdx = unpairedDebits.findIndex(dr => Math.abs(dr.amount - cr.amount) < 0.01);
+        if (matchIdx !== -1) {
+          let dr = unpairedDebits.splice(matchIdx, 1)[0];
+          pairedGroups.push({ ...cr, isContra: true });
+          pairedGroups.push({ ...dr, isContra: true });
+        } else {
+          unpairedCredits.push({ ...cr, isContra: false });
+        }
+      });
+
+      let remainingDebits = unpairedDebits.map(dr => ({ ...dr, isContra: false }));
+
+      // Order: Paired First (Up-Down), then all single Credits, then all single Debits
+      return [...pairedGroups, ...unpairedCredits, ...remainingDebits];
     }
 
     async function parseFile(file) {
@@ -325,7 +350,7 @@
           }
         });
 
-        // 3. Pass 3: Random / Non-Round Odd Amount Match (e.g. 6511, 9219)
+        // 3. Pass 3: Random / Non-Round Odd Amount Match
         softEntries.filter(s => !s.matched).forEach(s => {
           if (!isRoundAmount(s.amount)) {
             let b = bankEntries.find(x => 
@@ -357,9 +382,12 @@
           }
         });
 
-        // 5. Unmatched Buckets
-        results.onlySoft = softEntries.filter(s => !s.matched && !results.review.some(r => r.soft.id === s.id));
-        results.onlyBank = bankEntries.filter(b => !b.matched && !results.review.some(r => r.bank.id === b.id));
+        // 5. Unmatched Buckets with Smart Reversal Pairing & Sorting
+        let rawOnlySoft = softEntries.filter(s => !s.matched && !results.review.some(r => r.soft.id === s.id));
+        let rawOnlyBank = bankEntries.filter(b => !b.matched && !results.review.some(r => r.bank.id === b.id));
+
+        results.onlySoft = organizePendingList(rawOnlySoft);
+        results.onlyBank = organizePendingList(rawOnlyBank);
 
         renderUI();
       } catch (err) {
@@ -386,152 +414,4 @@
     }
 
     function switchTab(tab) {
-      const container = document.getElementById('tabContent');
-      container.innerHTML = "";
-
-      ['Review', 'Matched', 'Unmatched'].forEach(t => {
-        let btn = document.getElementById('tab' + t);
-        if (t.toLowerCase() === tab) {
-          btn.className = "flex-1 py-1.5 rounded-lg bg-white shadow text-slate-900 font-bold";
-        } else {
-          btn.className = "flex-1 py-1.5 rounded-lg text-slate-500 font-medium";
-        }
-      });
-
-      if (tab === 'review') {
-        if (results.review.length === 0) {
-          container.innerHTML = `<div class="p-6 text-center text-xs text-slate-400">All amounts matched perfectly! No round figure conflicts.</div>`;
-          return;
-        }
-        results.review.forEach(item => {
-          container.innerHTML += `
-            <div class="bg-amber-50/70 border border-amber-200 rounded-xl p-3 text-xs space-y-2">
-              <div class="flex justify-between items-center font-bold text-amber-900">
-                <span>₹${item.soft.amount.toLocaleString('en-IN')} (${item.soft.type})</span>
-                <span class="text-[10px] bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-semibold">Review Needed</span>
-              </div>
-              <div class="space-y-1 text-slate-700 bg-white p-2.5 rounded-lg border border-amber-100">
-                <div class="flex justify-between">
-                  <span class="font-semibold text-slate-400">Software:</span>
-                  <span class="text-[11px] text-indigo-700 font-bold">${item.soft.date}</span>
-                </div>
-                <div class="text-slate-800 font-medium">${item.soft.name}</div>
-                <div class="flex justify-between mt-1 pt-1 border-t border-slate-100">
-                  <span class="font-semibold text-slate-400">Bank:</span>
-                  <span class="text-[11px] text-emerald-700 font-bold">${item.bank.date}</span>
-                </div>
-                <div class="text-slate-800">${item.bank.name}</div>
-              </div>
-            </div>
-          `;
-        });
-      } else if (tab === 'matched') {
-        results.matched.slice(0, 100).forEach(item => {
-          container.innerHTML += `
-            <div class="bg-white border border-emerald-200 rounded-xl p-3 text-xs flex justify-between items-center shadow-sm">
-              <div class="pr-2">
-                <div class="font-bold text-slate-800">${item.soft.name}</div>
-                <div class="text-[10px] text-slate-400 truncate max-w-[200px]">${item.bank.name}</div>
-              </div>
-              <div class="text-right whitespace-nowrap">
-                <div class="font-bold text-emerald-600">₹${item.soft.amount.toLocaleString('en-IN')}</div>
-                <div class="text-[10px] text-slate-600 font-medium">S: ${item.soft.date} | B: ${item.bank.date}</div>
-                <div class="text-[9px] text-emerald-700 font-semibold">${item.matchType}</div>
-              </div>
-            </div>
-          `;
-        });
-        if (results.matched.length > 100) {
-          container.innerHTML += `<div class="text-center text-xs text-slate-400 py-2">Showing first 100 of ${results.matched.length} matched records (Download Excel for full report).</div>`;
-        }
-      } else if (tab === 'unmatched') {
-        container.innerHTML += `<div class="text-[11px] font-bold text-slate-500 uppercase px-1">Only In Bank (${results.onlyBank.length})</div>`;
-        results.onlyBank.slice(0, 50).forEach(b => {
-          container.innerHTML += `
-            <div class="bg-white border border-slate-200 rounded-xl p-2.5 text-xs flex justify-between items-center">
-              <div class="truncate max-w-[210px]">
-                <div class="text-[10px] text-indigo-700 font-bold">${b.date}</div>
-                <div class="font-medium text-slate-700">${b.name}</div>
-              </div>
-              <div class="font-bold text-indigo-600 whitespace-nowrap">₹${b.amount.toLocaleString('en-IN')}</div>
-            </div>
-          `;
-        });
-        container.innerHTML += `<div class="text-[11px] font-bold text-slate-500 uppercase px-1 mt-3">Only In Software (${results.onlySoft.length})</div>`;
-        results.onlySoft.slice(0, 50).forEach(s => {
-          container.innerHTML += `
-            <div class="bg-white border border-slate-200 rounded-xl p-2.5 text-xs flex justify-between items-center">
-              <div class="truncate max-w-[210px]">
-                <div class="text-[10px] text-indigo-700 font-bold">${s.date}</div>
-                <div class="font-medium text-slate-700">${s.name}</div>
-              </div>
-              <div class="font-bold text-slate-600 whitespace-nowrap">₹${s.amount.toLocaleString('en-IN')}</div>
-            </div>
-          `;
-        });
-      }
-    }
-
-    // 📥 Excel Export with Strict String DD/MM/YYYY
-    function exportToExcel() {
-      if (results.matched.length === 0 && results.review.length === 0 && results.onlyBank.length === 0 && results.onlySoft.length === 0) {
-        alert("Pehle reconciliation run karein!");
-        return;
-      }
-
-      const wb = XLSX.utils.book_new();
-
-      // Sheet 1: Review Conflicts
-      const reviewData = results.review.map(r => ({
-        "Software Date": "'" + r.soft.date,
-        "Bank Date": "'" + r.bank.date,
-        "Amount": r.soft.amount,
-        "Type": r.soft.type,
-        "Software Party Name": r.soft.name,
-        "Bank Narration": r.bank.name,
-        "Conflict Reason": r.reason
-      }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reviewData.length ? reviewData : [{"Status": "No Conflicts"}]), "Review_Conflicts");
-
-      // Sheet 2: Auto Matched
-      const matchedData = results.matched.map(m => ({
-        "Software Date": "'" + m.soft.date,
-        "Bank Date": "'" + m.bank.date,
-        "Amount": m.soft.amount,
-        "Type": m.soft.type,
-        "Software Party Name": m.soft.name,
-        "Bank Narration": m.bank.name,
-        "Match Method": m.matchType,
-        "Status": "RECONCILED"
-      }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(matchedData.length ? matchedData : [{"Status": "No Matched Records"}]), "Auto_Matched");
-
-      // Sheet 3: Only In Bank
-      const bankOnlyData = results.onlyBank.map(b => ({
-        "Bank Date": "'" + b.date,
-        "Amount": b.amount,
-        "Type": b.type,
-        "Bank Narration": b.name,
-        "Action Required": "Post in Software"
-      }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bankOnlyData.length ? bankOnlyData : [{"Status": "None"}]), "Only_In_Bank");
-
-      // Sheet 4: Only In Software
-      const softOnlyData = results.onlySoft.map(s => ({
-        "Software Date": "'" + s.date,
-        "Amount": s.amount,
-        "Type": s.type,
-        "Party Name": s.name,
-        "Action Required": "Pending Bank Clearance"
-      }));
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(softOnlyData.length ? softOnlyData : [{"Status": "None"}]), "Only_In_Software");
-
-      const today = new Date();
-      const dd = String(today.getDate()).padStart(2, '0');
-      const mm = String(today.getMonth() + 1).padStart(2, '0');
-      const yyyy = today.getFullYear();
-      XLSX.writeFile(wb, `Reconciliation_Report_${dd}-${mm}-${yyyy}.xlsx`);
-    }
-  </script>
-</body>
-</html>
+      const container = document.getElementById('tabContent
