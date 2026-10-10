@@ -16,7 +16,7 @@
   <div class="bg-indigo-700 text-white p-4 shadow-md sticky top-0 z-50 flex justify-between items-center">
     <div>
       <h1 class="text-xl font-bold tracking-tight">Bank Reconcile</h1>
-      <p class="text-xs text-indigo-200">Smart Odd/Round & Cheque Recon</p>
+      <p class="text-xs text-indigo-200">Date Format: DD/MM/YYYY</p>
     </div>
     <button id="exportBtnTop" onclick="exportToExcel()" class="hidden bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white text-xs font-bold py-2 px-3 rounded-lg shadow transition flex items-center space-x-1">
       <span>📥 Export</span>
@@ -84,6 +84,42 @@
 
     const STOPWORDS = ["PVT", "LTD", "LIMITED", "ENTERPRISE", "ENTERPRISES", "AGENCY", "AGENCIES", "PHARMA", "MEDICAL", "STORE", "CHEMIST", "AND", "CO", "DISTRIBUTOR", "DISTRIBUTORS", "ASSOCIATES", "INDIA"];
 
+    // Date standardizer to DD/MM/YYYY
+    function formatToDDMMYYYY(val) {
+      if (!val) return "";
+      let str = String(val).replace(/\0/g, '').trim();
+      if (!str || str.toLowerCase() === "nan") return "";
+
+      // Excel serial date number
+      if (!isNaN(str) && Number(str) > 20000 && Number(str) < 70000) {
+        let excelDate = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
+        let d = String(excelDate.getUTCDate()).padStart(2, '0');
+        let m = String(excelDate.getUTCMonth() + 1).padStart(2, '0');
+        let y = excelDate.getUTCFullYear();
+        return `${d}/${m}/${y}`;
+      }
+
+      // Check YYYY-MM-DD or YYYY/MM/DD
+      let ymdMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+      if (ymdMatch) {
+        let y = ymdMatch[1];
+        let m = String(ymdMatch[2]).padStart(2, '0');
+        let d = String(ymdMatch[3]).padStart(2, '0');
+        return `${d}/${m}/${y}`;
+      }
+
+      // Check DD-MM-YYYY or DD/MM/YYYY
+      let dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+      if (dmyMatch) {
+        let d = String(dmyMatch[1]).padStart(2, '0');
+        let m = String(dmyMatch[2]).padStart(2, '0');
+        let y = dmyMatch[3];
+        return `${d}/${m}/${y}`;
+      }
+
+      return str;
+    }
+
     function cleanName(str) {
       if (!str) return [];
       let cleaned = String(str).replace(/\0/g, '').toUpperCase().replace(/[^A-Z0-9 ]/g, " ");
@@ -96,7 +132,6 @@
       return softTokens.some(token => upperNarration.includes(token));
     }
 
-    // Identifies Round Amounts (e.g. 50,000, 2,00,000, 30,000)
     function isRoundAmount(amt) {
       if (amt >= 10000) return amt % 1000 === 0;
       if (amt >= 1000) return amt % 500 === 0;
@@ -135,7 +170,7 @@
             if (cl.includes("particular")) colMap.particulars = cIdx;
             if (cl.includes("amount")) colMap.amount = cIdx;
             if (cl.includes("debit/credit") || cl.includes("type")) colMap.type = cIdx;
-            if (cl.includes("date")) colMap.date = cIdx;
+            if (cl.includes("date") && !colMap.date) colMap.date = cIdx;
             if (cl.includes("cheque")) colMap.chq = cIdx;
           });
           break;
@@ -151,7 +186,7 @@
         let amount = parseFloat(rawAmt);
         let type = String(row[colMap.type] || "").trim().toUpperCase();
         let name = String(row[colMap.particulars] || "").trim();
-        let date = String(row[colMap.date] || "").trim();
+        let date = formatToDDMMYYYY(row[colMap.date]);
         let chq = String(row[colMap.chq] || "").replace(/[\t,\0]/g, '').replace(/\.0$/, '').trim();
         if (chq.toLowerCase() === "nan") chq = "";
 
@@ -198,10 +233,9 @@
         let rawAmt = String(row[colMap.amount] || "").replace(/[\t,\0]/g, '').trim();
         let signedAmount = parseFloat(rawAmt);
         let partyName = String(row[colMap.party] || "").replace(/\0/g, '').trim();
-        let date = String(row[colMap.date] || "").trim();
+        let date = formatToDDMMYYYY(row[colMap.date]);
         let chq = String(row[colMap.chq] || "").replace(/[\t,\0]/g, '').trim();
-        
-        // Remove standard mode tokens
+
         if (["nan", "NEFT", "RTGS", "UPI", "IMPS", "CHEQUE"].includes(chq.toUpperCase())) {
           chq = "";
         }
@@ -247,7 +281,7 @@
 
         results = { matched: [], review: [], onlyBank: [], onlySoft: [] };
 
-        // 1. Pass 1: Cheque / Reference Match + Amount
+        // 1. Pass 1: Cheque / Ref Match + Amount
         softEntries.forEach(s => {
           if (s.chq && s.chq.length >= 4) {
             let b = bankEntries.find(x => 
@@ -279,7 +313,7 @@
           }
         });
 
-        // 3. Pass 3: Random / Non-Round Odd Amount Match (e.g. 6511, 9219, etc.)
+        // 3. Pass 3: Random / Non-Round Odd Amount Match (e.g. 6511, 9219)
         softEntries.filter(s => !s.matched).forEach(s => {
           if (!isRoundAmount(s.amount)) {
             let b = bankEntries.find(x => 
@@ -295,7 +329,7 @@
           }
         });
 
-        // 4. Pass 4: ONLY Round amounts where NOTHING else matched -> Review / Diff
+        // 4. Pass 4: ONLY Round amounts where NOTHING else matched -> Review
         softEntries.filter(s => !s.matched).forEach(s => {
           let b = bankEntries.find(x => 
             !x.matched && 
@@ -365,8 +399,16 @@
                 <span class="text-[10px] bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-semibold">Review Needed</span>
               </div>
               <div class="space-y-1 text-slate-700 bg-white p-2.5 rounded-lg border border-amber-100">
-                <div><span class="font-semibold text-slate-400">System:</span> ${item.soft.name}</div>
-                <div><span class="font-semibold text-slate-400">Bank:</span> ${item.bank.name}</div>
+                <div class="flex justify-between">
+                  <span class="font-semibold text-slate-400">Software:</span>
+                  <span class="text-[11px] text-slate-500 font-semibold">${item.soft.date}</span>
+                </div>
+                <div class="text-slate-800 font-medium">${item.soft.name}</div>
+                <div class="flex justify-between mt-1 pt-1 border-t border-slate-100">
+                  <span class="font-semibold text-slate-400">Bank:</span>
+                  <span class="text-[11px] text-slate-500 font-semibold">${item.bank.date}</span>
+                </div>
+                <div class="text-slate-800">${item.bank.name}</div>
               </div>
             </div>
           `;
@@ -381,20 +423,24 @@
               </div>
               <div class="text-right whitespace-nowrap">
                 <div class="font-bold text-emerald-600">₹${item.soft.amount.toLocaleString('en-IN')}</div>
-                <div class="text-[10px] text-slate-400">${item.soft.type} | <span class="text-emerald-700 font-semibold">${item.matchType}</span></div>
+                <div class="text-[10px] text-slate-600 font-medium">S: ${item.soft.date} | B: ${item.bank.date}</div>
+                <div class="text-[9px] text-emerald-700 font-semibold">${item.matchType}</div>
               </div>
             </div>
           `;
         });
         if (results.matched.length > 100) {
-          container.innerHTML += `<div class="text-center text-xs text-slate-400 py-2">Showing first 100 of ${results.matched.length} matched records (Download Excel for full list).</div>`;
+          container.innerHTML += `<div class="text-center text-xs text-slate-400 py-2">Showing first 100 of ${results.matched.length} matched records (Download Excel for full report).</div>`;
         }
       } else if (tab === 'unmatched') {
         container.innerHTML += `<div class="text-[11px] font-bold text-slate-500 uppercase px-1">Only In Bank (${results.onlyBank.length})</div>`;
         results.onlyBank.slice(0, 50).forEach(b => {
           container.innerHTML += `
             <div class="bg-white border border-slate-200 rounded-xl p-2.5 text-xs flex justify-between items-center">
-              <div class="truncate max-w-[210px] font-medium text-slate-700">${b.name}</div>
+              <div class="truncate max-w-[210px]">
+                <div class="text-[10px] text-slate-400 font-semibold">${b.date}</div>
+                <div class="font-medium text-slate-700">${b.name}</div>
+              </div>
               <div class="font-bold text-indigo-600 whitespace-nowrap">₹${b.amount.toLocaleString('en-IN')}</div>
             </div>
           `;
@@ -403,7 +449,10 @@
         results.onlySoft.slice(0, 50).forEach(s => {
           container.innerHTML += `
             <div class="bg-white border border-slate-200 rounded-xl p-2.5 text-xs flex justify-between items-center">
-              <div class="font-medium text-slate-700">${s.name}</div>
+              <div class="truncate max-w-[210px]">
+                <div class="text-[10px] text-slate-400 font-semibold">${s.date}</div>
+                <div class="font-medium text-slate-700">${s.name}</div>
+              </div>
               <div class="font-bold text-slate-600 whitespace-nowrap">₹${s.amount.toLocaleString('en-IN')}</div>
             </div>
           `;
@@ -411,6 +460,7 @@
       }
     }
 
+    // 📥 Excel Export with Strict DD/MM/YYYY
     function exportToExcel() {
       if (results.matched.length === 0 && results.review.length === 0 && results.onlyBank.length === 0 && results.onlySoft.length === 0) {
         alert("Pehle reconciliation run karein!");
@@ -419,20 +469,24 @@
 
       const wb = XLSX.utils.book_new();
 
+      // Sheet 1: Review Conflicts
       const reviewData = results.review.map(r => ({
+        "Software Date (DD/MM/YYYY)": r.soft.date,
+        "Bank Date (DD/MM/YYYY)": r.bank.date,
         "Amount": r.soft.amount,
         "Type": r.soft.type,
-        "Software Date": r.soft.date,
         "Software Party Name": r.soft.name,
         "Bank Narration": r.bank.name,
         "Conflict Reason": r.reason
       }));
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reviewData.length ? reviewData : [{"Status": "No Conflicts"}]), "Review_Conflicts");
 
+      // Sheet 2: Auto Matched
       const matchedData = results.matched.map(m => ({
+        "Software Date (DD/MM/YYYY)": m.soft.date,
+        "Bank Date (DD/MM/YYYY)": m.bank.date,
         "Amount": m.soft.amount,
         "Type": m.soft.type,
-        "Software Date": m.soft.date,
         "Software Party Name": m.soft.name,
         "Bank Narration": m.bank.name,
         "Match Method": m.matchType,
@@ -440,26 +494,31 @@
       }));
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(matchedData.length ? matchedData : [{"Status": "No Matched Records"}]), "Auto_Matched");
 
+      // Sheet 3: Only In Bank
       const bankOnlyData = results.onlyBank.map(b => ({
+        "Bank Date (DD/MM/YYYY)": b.date,
         "Amount": b.amount,
         "Type": b.type,
-        "Bank Date": b.date,
         "Bank Narration": b.name,
         "Action Required": "Post in Software"
       }));
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bankOnlyData.length ? bankOnlyData : [{"Status": "None"}]), "Only_In_Bank");
 
+      // Sheet 4: Only In Software
       const softOnlyData = results.onlySoft.map(s => ({
+        "Software Date (DD/MM/YYYY)": s.date,
         "Amount": s.amount,
         "Type": s.type,
-        "Software Date": s.date,
         "Party Name": s.name,
         "Action Required": "Pending Bank Clearance"
       }));
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(softOnlyData.length ? softOnlyData : [{"Status": "None"}]), "Only_In_Software");
 
-      const today = new Date().toISOString().slice(0, 10);
-      XLSX.writeFile(wb, `Reconciliation_Report_${today}.xlsx`);
+      const today = new Date();
+      const dd = String(today.getDate()).padStart(2, '0');
+      const mm = String(today.getMonth() + 1).padStart(2, '0');
+      const yyyy = today.getFullYear();
+      XLSX.writeFile(wb, `Reconciliation_Report_${dd}-${mm}-${yyyy}.xlsx`);
     }
   </script>
 </body>
