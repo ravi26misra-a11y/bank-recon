@@ -16,7 +16,7 @@
   <div class="bg-indigo-700 text-white p-4 shadow-md sticky top-0 z-50 flex justify-between items-center">
     <div>
       <h1 class="text-xl font-bold tracking-tight">Bank Reconcile</h1>
-      <p class="text-xs text-indigo-200">Date Format: DD/MM/YYYY</p>
+      <p class="text-xs text-indigo-200">Strict Date Format: DD/MM/YYYY</p>
     </div>
     <button id="exportBtnTop" onclick="exportToExcel()" class="hidden bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white text-xs font-bold py-2 px-3 rounded-lg shadow transition flex items-center space-x-1">
       <span>📥 Export</span>
@@ -84,22 +84,34 @@
 
     const STOPWORDS = ["PVT", "LTD", "LIMITED", "ENTERPRISE", "ENTERPRISES", "AGENCY", "AGENCIES", "PHARMA", "MEDICAL", "STORE", "CHEMIST", "AND", "CO", "DISTRIBUTOR", "DISTRIBUTORS", "ASSOCIATES", "INDIA"];
 
-    // Date standardizer to DD/MM/YYYY
+    // 100% Robust Date Converter to DD/MM/YYYY
     function formatToDDMMYYYY(val) {
-      if (!val) return "";
-      let str = String(val).replace(/\0/g, '').trim();
-      if (!str || str.toLowerCase() === "nan") return "";
-
-      // Excel serial date number
-      if (!isNaN(str) && Number(str) > 20000 && Number(str) < 70000) {
-        let excelDate = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
-        let d = String(excelDate.getUTCDate()).padStart(2, '0');
-        let m = String(excelDate.getUTCMonth() + 1).padStart(2, '0');
-        let y = excelDate.getUTCFullYear();
+      if (!val && val !== 0) return "-";
+      
+      // If already a JavaScript Date object
+      if (val instanceof Date) {
+        let d = String(val.getDate()).padStart(2, '0');
+        let m = String(val.getMonth() + 1).padStart(2, '0');
+        let y = val.getFullYear();
         return `${d}/${m}/${y}`;
       }
 
-      // Check YYYY-MM-DD or YYYY/MM/DD
+      let str = String(val).replace(/\0/g, '').trim();
+      if (!str || str.toLowerCase() === "nan") return "-";
+
+      // If Excel serial number (like 46118, 46123)
+      let num = Number(str);
+      if (!isNaN(num) && num > 10000 && num < 80000) {
+        // Excel base date is 30 Dec 1899
+        let excelEpoch = new Date(Date.UTC(1899, 11, 30));
+        let converted = new Date(excelEpoch.getTime() + num * 86400000);
+        let d = String(converted.getUTCDate()).padStart(2, '0');
+        let m = String(converted.getUTCMonth() + 1).padStart(2, '0');
+        let y = converted.getUTCFullYear();
+        return `${d}/${m}/${y}`;
+      }
+
+      // If YYYY-MM-DD or YYYY/MM/DD
       let ymdMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
       if (ymdMatch) {
         let y = ymdMatch[1];
@@ -108,7 +120,7 @@
         return `${d}/${m}/${y}`;
       }
 
-      // Check DD-MM-YYYY or DD/MM/YYYY
+      // If DD-MM-YYYY or DD/MM/YYYY
       let dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
       if (dmyMatch) {
         let d = String(dmyMatch[1]).padStart(2, '0');
@@ -144,7 +156,7 @@
         reader.onload = (e) => {
           try {
             const data = new Uint8Array(e.target.result);
-            const workbook = XLSX.read(data, { type: 'array' });
+            const workbook = XLSX.read(data, { type: 'array', cellDates: true });
             const sheet = workbook.Sheets[workbook.SheetNames[0]];
             const rawMatrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
             resolve(rawMatrix);
@@ -170,7 +182,7 @@
             if (cl.includes("particular")) colMap.particulars = cIdx;
             if (cl.includes("amount")) colMap.amount = cIdx;
             if (cl.includes("debit/credit") || cl.includes("type")) colMap.type = cIdx;
-            if (cl.includes("date") && !colMap.date) colMap.date = cIdx;
+            if (cl.includes("date") && colMap.date === undefined) colMap.date = cIdx;
             if (cl.includes("cheque")) colMap.chq = cIdx;
           });
           break;
@@ -401,12 +413,12 @@
               <div class="space-y-1 text-slate-700 bg-white p-2.5 rounded-lg border border-amber-100">
                 <div class="flex justify-between">
                   <span class="font-semibold text-slate-400">Software:</span>
-                  <span class="text-[11px] text-slate-500 font-semibold">${item.soft.date}</span>
+                  <span class="text-[11px] text-indigo-700 font-bold">${item.soft.date}</span>
                 </div>
                 <div class="text-slate-800 font-medium">${item.soft.name}</div>
                 <div class="flex justify-between mt-1 pt-1 border-t border-slate-100">
                   <span class="font-semibold text-slate-400">Bank:</span>
-                  <span class="text-[11px] text-slate-500 font-semibold">${item.bank.date}</span>
+                  <span class="text-[11px] text-emerald-700 font-bold">${item.bank.date}</span>
                 </div>
                 <div class="text-slate-800">${item.bank.name}</div>
               </div>
@@ -438,7 +450,7 @@
           container.innerHTML += `
             <div class="bg-white border border-slate-200 rounded-xl p-2.5 text-xs flex justify-between items-center">
               <div class="truncate max-w-[210px]">
-                <div class="text-[10px] text-slate-400 font-semibold">${b.date}</div>
+                <div class="text-[10px] text-indigo-700 font-bold">${b.date}</div>
                 <div class="font-medium text-slate-700">${b.name}</div>
               </div>
               <div class="font-bold text-indigo-600 whitespace-nowrap">₹${b.amount.toLocaleString('en-IN')}</div>
@@ -450,7 +462,7 @@
           container.innerHTML += `
             <div class="bg-white border border-slate-200 rounded-xl p-2.5 text-xs flex justify-between items-center">
               <div class="truncate max-w-[210px]">
-                <div class="text-[10px] text-slate-400 font-semibold">${s.date}</div>
+                <div class="text-[10px] text-indigo-700 font-bold">${s.date}</div>
                 <div class="font-medium text-slate-700">${s.name}</div>
               </div>
               <div class="font-bold text-slate-600 whitespace-nowrap">₹${s.amount.toLocaleString('en-IN')}</div>
@@ -460,7 +472,7 @@
       }
     }
 
-    // 📥 Excel Export with Strict DD/MM/YYYY
+    // 📥 Excel Export with Strict String DD/MM/YYYY
     function exportToExcel() {
       if (results.matched.length === 0 && results.review.length === 0 && results.onlyBank.length === 0 && results.onlySoft.length === 0) {
         alert("Pehle reconciliation run karein!");
@@ -471,8 +483,8 @@
 
       // Sheet 1: Review Conflicts
       const reviewData = results.review.map(r => ({
-        "Software Date (DD/MM/YYYY)": r.soft.date,
-        "Bank Date (DD/MM/YYYY)": r.bank.date,
+        "Software Date": "'" + r.soft.date,
+        "Bank Date": "'" + r.bank.date,
         "Amount": r.soft.amount,
         "Type": r.soft.type,
         "Software Party Name": r.soft.name,
@@ -483,8 +495,8 @@
 
       // Sheet 2: Auto Matched
       const matchedData = results.matched.map(m => ({
-        "Software Date (DD/MM/YYYY)": m.soft.date,
-        "Bank Date (DD/MM/YYYY)": m.bank.date,
+        "Software Date": "'" + m.soft.date,
+        "Bank Date": "'" + m.bank.date,
         "Amount": m.soft.amount,
         "Type": m.soft.type,
         "Software Party Name": m.soft.name,
@@ -496,7 +508,7 @@
 
       // Sheet 3: Only In Bank
       const bankOnlyData = results.onlyBank.map(b => ({
-        "Bank Date (DD/MM/YYYY)": b.date,
+        "Bank Date": "'" + b.date,
         "Amount": b.amount,
         "Type": b.type,
         "Bank Narration": b.name,
@@ -506,7 +518,7 @@
 
       // Sheet 4: Only In Software
       const softOnlyData = results.onlySoft.map(s => ({
-        "Software Date (DD/MM/YYYY)": s.date,
+        "Software Date": "'" + s.date,
         "Amount": s.amount,
         "Type": s.type,
         "Party Name": s.name,
